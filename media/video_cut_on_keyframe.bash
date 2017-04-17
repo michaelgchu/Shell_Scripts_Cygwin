@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 SCRIPTNAME='Cut Video on Keyframe, Stream Copy'
-LAST_UPDATED='2017-03-13'
+LAST_UPDATED='2017-04-16'
 # Author: Michael Chu, https://github.com/michaelgchu/
 # See Usage() function for purpose and calling details
 #
+# TODO: bug fix -- quote the input filename when using ... ffprobe call breaks when spaces exist
+#
 # Change Log
 # ==========
+# 2017-04-16
+# - Bug fix: for Cygwin, use  cygpath  to change paths to Windows-style
 # 2017-03-13
 # - First working version
 
@@ -16,7 +20,7 @@ LAST_UPDATED='2017-03-13'
 DEV_MODE=false
 
 # Listing of all required tools.  The script will abort if any cannot be found
-requiredTools='ffmpeg ffprobe mktemp cygpath'
+requiredTools='ffmpeg ffprobe mktemp'
 
 # -----------------------------------------------------------------
 # General Functions
@@ -28,21 +32,19 @@ Usage()
 	cat << EOM
 Usage: ${0##*/} [options]
 
-Extracts the specified time range from the provided video.  The starting point
-is set as the keyframe just before the provided start time, so that the video
-playback looks fine right from the start.
+Extracts the specified time range(s) from the provided video.  It attempts to
+align the start point to a keyframe, to avoid initial playback issues.
 
-The start & end times can be provided as straight seconds, or as  hh:mm:ss
-You can specify multiple ranges by listing them out comma-delimited.  In this
-case, the provided output filename becomes a base and the clip numbers and time
-ranges are added to it.
+Time can be provided as straight seconds, or as  hh:mm:ss
+Use commas to separate multiple time ranges. In this case, output clips are
+named using the provided filename plus the clip # and time range.
 e.g. Given  -o out.mp4  -r 11:30-21:45,33:00-34:59
 the script will create files:
 	out_01_1130-2145.mp4
 	out_02_3300-3459.mp4
 
-The 'ffprobe' tool is used to analyze the file.
-The 'ffmpeg' tool is used to perform the stream copy clip extraction.
+'ffprobe' is used to analyze the file.
+'ffmpeg'  is used to perform the stream copy clip extraction.
 
 Results are decent when played in VLC, but Windows Media Player does funny
 things.  Things are less impressive when you concatenate the outputs.
@@ -159,6 +161,14 @@ readarray -O 1 -t arrRanges <<- EOD
 	$(echo $range | tr --squeeze ',' '\n' )
 EOD
 totalClips=${#arrRanges[@]}
+
+# Adjust file paths to be Windows-based if we are running in Cygwin AND the paths contain any slashes.
+# Reason: assume the binaries used can handle Windows-style, and probably not UNIX-style
+if [[ "$OSTYPE" = 'cygwin' && "$src $dst" =~ '/' ]] ; then
+	debugsay "Converting paths to Windows-style"
+	src=$(cygpath --windows "$src")
+	dst=$(cygpath --windows "$dst")
+fi
 
 # Split out the output filename into base and extension, if multiple clips are to be created
 if [ $totalClips -gt 1 ] ; then
@@ -320,7 +330,11 @@ if $ConcatFiles ; then
 # Not doing this, but doesn't seem to affect my tests:
 # "If you cut with stream copy (-c copy) you need to use the -avoid_negative_ts 1 option if you want to use that segment with the ?concat demuxer."
 	echo -e "\nConcatenating individual clips into final output file '$dst'"
-	listToolPath="$(cygpath --absolute --windows "$tfConcatlist")"
+	if [ "$OSTYPE" = 'cygwin' ] ; then
+		listToolPath="$(cygpath --absolute --windows "$tfConcatlist")"
+	else
+		listToolPath="$tfConcatlist"
+	fi
 	if $DEV_MODE ; then
 		debugsay "Content of list to pass to 'concat' operation:"
 		cat "$tfConcatlist"
