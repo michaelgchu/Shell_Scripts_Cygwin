@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 SCRIPTNAME='Cut Video on Keyframe, Stream Copy'
-LAST_UPDATED='2017-04-16'
+LAST_UPDATED='2017-09-04 WIP'
 # Author: Michael Chu, https://github.com/michaelgchu/
 # See Usage() function for purpose and calling details
 #
@@ -8,6 +8,8 @@ LAST_UPDATED='2017-04-16'
 #
 # Change Log
 # ==========
+# 2017-09-04
+# - Add ability to set input and output options for FFmpeg (not fully tested!)
 # 2017-04-16
 # - Bug fix: for Cygwin, use  cygpath  to change paths to Windows-style
 # 2017-03-13
@@ -64,6 +66,8 @@ OPTIONS
    -c    Concatenate the separate ranges into a single output video file
    -y    Overwrite output file without prompting
    -q    Make ffmpeg (more) quiet
+   -I 'input options for FFmpeg'	(not fully tested)
+   -O 'output options for FFmpeg'	(not fully tested)
    -C    Show the ffmpeg/ffprobe Commands executed
    -D    DEV/DEBUG mode on
 
@@ -117,9 +121,11 @@ src=''
 dst=''
 range=''
 runOptions=''
+inputOptions=''
+outputOptions=''
 ConcatFiles=false
 ShowCommands=false
-while getopts ":hi:o:r:cyqCD" OPTION
+while getopts ":hi:o:r:cyqI:O:CD" OPTION
 do
 	case $OPTION in
 		h) Usage; exit 0 ;;
@@ -130,6 +136,8 @@ do
 		q) runOptions="$runOptions -v error" ;;
 		c) ConcatFiles=true ;;
 		C) ShowCommands=true ;;
+		I) inputOptions="$OPTARG" ;;
+		O) outputOptions="$OPTARG" ;;
 		D) test $DEV_MODE = true && set -x || DEV_MODE=true ;;
 		*) echo "Warning: ignoring unrecognized option -$OPTARG" ;;
 	esac
@@ -322,7 +330,7 @@ do
 	echo 'Calling FFmpeg to create the clip ...'
 	(
 	test $ShowCommands = true && set -x
-	ffmpeg -hide_banner $runOptions -ss $kfStart -i "$src" -t $duration -c copy -map_metadata 0 "$dstClip"
+	ffmpeg -hide_banner $runOptions -ss $kfStart $inputOptions -i "$src" -t $duration -c copy -map_metadata 0 $outputOptions "$dstClip"
 	) || exit $?
 done # looping through all the ranges
 
