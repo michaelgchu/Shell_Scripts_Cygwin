@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 SCRIPTNAME='Side-by-side diff with colour'
-LAST_UPDATED='2017-04-27'
+LAST_UPDATED='2020-06-14'
 # Author: Michael Chu, https://github.com/michaelgchu/
 # See Usage() for purpose and call details
 #
 # Updates
 # =======
+# 20200614
+# - Allow use of <(...) instead of passing just files
+# - Make use of cmp optional
+# - Bug fix for HTML output without word highlighting: grab the ANSI codes used by colordiff so the search & replace works properly
 # 20170427
 # - Bug fix: for word highlighting, fix alignment issue when LHS is just whitespace
 # - Bug fix: for word highlighting, make use of the extra  diff  options provided by caller
@@ -41,22 +45,27 @@ LAST_UPDATED='2017-04-27'
 
 DEV_MODE=false
 
-# Define the 4 standard diff colours here, to be used for word highlighting mode
-# These can be used in echo and printf statements by Bash and Awk and Perl.
-# NOTE: only use ccBlack to turn OFF the other colours
-ccBlack="\x1B[0;0m"
-ccRed="\x1B[1;31m"
-ccBlue="\x1B[1;34m"
-ccMagenta="\x1B[1;35m"
+# This associative array will store the ANSI colour sequences that colordiff
+# uses to represent: removed; same; changed; added
+# They are used for word highlighting mode
+# We hardcode the values now, and replace later only if required.
+declare -A cc
+cc['removed']="\x1B[1;31m"	# red
+cc['same']="\x1B[0;0m"		# black
+cc['changed']="\x1B[1;35m"	# magenta
+cc['added']="\x1B[1;34m"	# green/blue
 
-# Define again with regex metachars escaped, for use when preparing HTML output
-ccAwkPatBlack="\x1B\[0;0m"
-ccAwkPatRed="\x1B\[1;31m"
-ccAwkPatBlue="\x1B\[1;34m"
-ccAwkPatMagenta="\x1B\[1;35m"
+# This associative array has the same contents as <cc>, except the "["
+# character is escaped. This allows for using in regular expressions
+# They are used for a simple conversion to HTML
+declare -A cc_ree
+for kind in removed same changed added
+do
+	cc_ree[$kind]=$(perl -p -e 's/\[/\\[/g' <<< "${cc[$kind]}")
+done
 
 # Listing of all required tools.  The script will abort if any cannot be found
-requiredTools='diff file mktemp dos2unix wc cmp'
+requiredTools='diff file mktemp wc cmp'
 extraToolsForWordHighlighting='bc awk sed cut wdiff'
 
 # -------------------------------
@@ -67,10 +76,9 @@ Usage()
 {
 	printTitle
 	cat << EOM
-Usage: ${0##*/} [options] file1 file2
+Usage: ${0##*/} [options] file1/pipe1 file2/pipe2
 
 Performs a side-by-side 'diff' of the provided files.  Colourizes, if possible.
-Runs 'cmp' first to ensure there are differences to display.
 
 The  --ignore-space-change  diff option is used to eliminate whitespace diffs. 
 Note that wide lines will get trimmed, i.e. no line wrapping.
@@ -79,6 +87,10 @@ It runs the output through the 'less' pager, if required.
 
 To save the results to Word, use a terminal width of 132.  Paste results into
 Word, use landscape orientation and set margins to narrow.
+
+Since it allows for process substitution, you could run a command like this:
+$0 <(cut -c18-65 file1.txt | sort | dos2unix)  <(cut -c18-65 file2.txt | sort | dos2unix)
+
 
 OPTIONS
 =======
@@ -89,15 +101,15 @@ OPTIONS
    -w    Perform word highlighting for modified lines.
          Note 1: only visible sections of the line are highlighted 
          Note 2: this process is slow and a tad buggy. Take with grain of salt
-   -l    Output as HTML.
+   -l    Output as HTML.  Appears broken in Linux
          Note 1: your terminal still drives the viewing area of the HTML page
          Note 2: the source files should not contain HTML code
+   -b    Run basic 'cmp' first to ensure there are differences to display
    -C    Do not colourize the output using colordiff
    -N    Do not print line numbers for the diff output
    -P    Do not use the 'less' pager
    -q    Be Quiet: do not show notices, filenames
    -D    DEV/DEBUG mode on
-         Use twice to run 'set -x'
 
 EOM
 }
@@ -112,19 +124,29 @@ ansi2html()
 	<head>
 		<title> Comparison of "$file1" to "$file2" </title>
 		<meta name="description" content="$(date '+%Y-%m-%d') Execution command line: ${0##*/} $originalCmdLine" />
+		<style type="text/css">
+			.removed { color: red }
+			.same { color: black }
+			.changed { color: magenta }
+			.added { color: green }
+		</style>
 	</head>
 	<body>
 		<pre>
 EOD_HTML_Start
 
 	awk '{
-	# Ignore/remove the "black" ANSI colour code at the start of the line == we did not add that
-	sub(/'^$ccAwkPatBlack'/, "");
-	gsub(/'$ccAwkPatBlack'/, "</span>");
+	# Replace < with &lt; and > with &gt;
+	gsub(/</, "\\&lt;");
+	gsub(/>/, "\\&gt;");
+	# Ignore/remove the same/"black" ANSI colour code at the start of the line == we did not add that
+	sub(/'^${cc_ree['same']}'/, "");
+	# All other occurrences of same/"black" should be replaced with </SPAN> closing tags
+	gsub(/'${cc_ree['same']}'/, "</span>");
 	# Replace all colour codes we injected with the appropriate coloured "span" tags
-	gsub(/'$ccAwkPatRed'/, "<span style=\"color:red\">");
-	gsub(/'$ccAwkPatBlue'/, "<span style=\"color:blue\">");
-	gsub(/'$ccAwkPatMagenta'/, "<span style=\"color:magenta\">");
+	gsub(/'${cc_ree['removed']}'/, "<span class=\"removed\">");
+	gsub(/'${cc_ree['added']}'/, "<span class=\"added\">");
+	gsub(/'${cc_ree['changed']}'/, "<span class=\"changed\">");
 	print;
 }'
 
@@ -136,8 +158,42 @@ EOD_HTML_End
 }
 
 
+capture_colour_from_colordiff() {
+	# Run colordiff between 2 hardcoded files in order to extract the ANSI
+	# codes it uses for: removed; same; changed; added
+	# Stores these ANSI codes in an associative array that msut be
+	# declared in the main line:  cc
+	# Also stores these codes with the [ escaped so they can be referenced
+	# using regular expressions:  cc_ree
+	output=$(colordiff --width=30 --side-by-side \
+		<(cat <<- EODLEFT
+			<in A only>
+			L2 no diff
+			L3 has diff
+		EODLEFT
+		) \
+		<(cat <<- EODRIGHT
+			L2 no diff
+			L3 got diff
+			<in B only>
+		EODRIGHT
+		) )
+	for kind in removed same changed added
+	do
+		read line
+		# Each line starts with an ANSI code; return just that bit
+		# e.g.  Red == \x1B[1;31m
+		ansicode=$(perl -p -e 's/(?<=m).*//' <<< "$line")
+		# The [ is a regex metacharacter; escape it
+		ansi_re_escaped=$(perl -p -e 's/\[/\\[/g' <<< "$ansicode")
+		cc[$kind]="$ansicode"
+		cc_ree[$kind]="$ansi_re_escaped"
+	done <<< "$output"
+}
+
+
 # This function will be called on script exit, if required.
-finish() {
+clean_exit() {
 	if $DEV_MODE ; then
 		cat <<- EOM  >/dev/stderr
 
@@ -211,7 +267,8 @@ Colourize=true
 ShowLineNo=true
 WordHighlighting=false
 OutputAsHTML=false
-while getopts ":ho:wlCNPqD" OPTION
+UseCMP=false
+while getopts ":ho:wlCNPqbD" OPTION
 do
 	case $OPTION in
 		h) Usage; exit 0 ;;
@@ -222,13 +279,8 @@ do
 		N) ShowLineNo=false ;;
 		P) AvoidPager=true ;;
 		q) Be_Quiet=true ;;
-		D) 
-			if $DEV_MODE ; then
-				set -x
-			else
-				DEV_MODE=true
-			fi
-			;;
+		b) UseCMP=true ;;
+		D) DEV_MODE=true ;;
 		*) echo "Warning: ignoring unrecognized option -$OPTARG" ;;
 	esac
 done
@@ -244,7 +296,9 @@ if $DEV_MODE ; then
 		AvoidPager = $AvoidPager
 		Word Highlighting = $WordHighlighting
 		Output as HTML    = $OutputAsHTML
-		Be_Quiet   = $Be_Quiet ]
+		Be_Quiet   = $Be_Quiet
+		Use cmp    = $UseCMP
+		]
 	EODM
 fi
 
@@ -264,22 +318,93 @@ done
 test $flagCmdsOK = 'yes' || exit 1
 
 debugsay '[Checking for file1 & file2]'
-test -z "$2" && { echo 'Must supply 2 input filenames to compare. Run with  -h  to see options'; exit 1; }
-test -f "$1" -a -r "$1" || { echo "Error: '$1' is not readable, or is not a file"; exit 1; }
-test -f "$2" -a -r "$2" || { echo "Error: '$2' is not readable, or is not a file"; exit 1; }
+test -z "$2" && { echo 'Must supply 2 input filenames/pipes to compare. Run with  -h  to see options'; exit 1; }
+test -r "$1" || { echo "Error: '$1' is not readable"; exit 1; }
+test -r "$2" || { echo "Error: '$2' is not readable"; exit 1; }
+test -f "$1" -o -p "$1" || { echo "Error: '$1' is neither a file nor a pipe"; exit 1; }
+test -f "$2" -o -p "$2" || { echo "Error: '$2' is neither a file nor a pipe"; exit 1; }
 
-# Store these filenames for potential later use
+# Store these filenames for later use
 file1="$1"
 file2="$2"
 
 # -------------------------------
-# Test that the files are different
+# Test that the files are different - if requested and we are dealing with files
 # -------------------------------
 
-debugsay '[Checking that files are different]'
-if  cmp --silent "$1" "$2" ; then
-	echo 'Files are identical.'
-	exit 0
+if [ $UseCMP = true -a -f "$1" -a -f "$2" ] ; then
+	debugsay '[Checking that files are different]'
+	if  cmp --silent "$1" "$2" ; then
+		echo 'Files are identical.'
+		exit 0
+	fi
+fi
+
+# -------------------------------
+# Build up the files to compare.
+# Convert input DOS files to UNIX, if required
+# -------------------------------
+
+debugsay '[Creating temporary files]'
+trap clean_exit EXIT
+fileA=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
+fileB=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
+fileLHS=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
+fileRHS=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
+
+
+if ! $Be_Quiet ; then
+	debugsay '[Temporary files will start with the filenames]'
+	echo "INPUT: $1" > $fileA
+	echo "INPUT: $2" > $fileB
+fi
+
+if [ -f "$1" ] ; then
+	if  file "$1" | grep CRLF >/dev/null ; then
+		debugsay "[Must convert file '$1']"
+		dos2unix < "$1" >> $fileA || { echo "Error processing '$1'"; exit 1; }
+	else
+		debugsay "[Using file '$1' as-is]"
+		cat < "$1" >> $fileA || { echo "Error copying '$1'"; exit 1; }
+	fi
+else
+	debugsay "[Read pipe '$1', then check if conversion required]"
+	cat < $1 >> $fileA || { echo "Error copying '$1'"; exit 1; }
+	if  file "$fileA" | grep CRLF >/dev/null ; then
+		debugsay "[Must convert file]"
+		dos2unix $fileA || { echo "Error processing '$1'"; exit 1; }
+	fi
+fi
+
+if [ -f "$2" ] ; then
+	if  file "$2" | grep CRLF >/dev/null ; then
+		debugsay "[Must convert file '$2']"
+		dos2unix < "$2" >> $fileB || { echo "Error processing '$2'"; exit 1; }
+	else
+		debugsay "[Using file '$2' as-is]"
+		cat < "$2" >> $fileB || { echo "Error copying '$2'"; exit 1; }
+	fi
+else
+	debugsay "[Read pipe '$2', then check if conversion required]"
+	cat < $2 >> $fileB || { echo "Error copying '$2'"; exit 1; }
+	if  file "$fileB" | grep CRLF >/dev/null ; then
+		debugsay "[Must convert file]"
+		dos2unix $fileB || { echo "Error processing '$2'"; exit 1; }
+	fi
+fi
+
+# -------------------------------
+# Test that the files are different - if requested and we had a pipe
+# -------------------------------
+
+if [ $UseCMP = true ] ; then
+	if [ -p "$1" -o -p "$2" ] ; then
+		debugsay '[Checking that inputs are different, now that we have them settled]'
+		if  cmp --silent "$fileA" "$fileB" ; then
+			echo 'Files are identical.'
+			exit 0
+		fi
+	fi
 fi
 
 # -------------------------------
@@ -318,7 +443,7 @@ else
 			x=4
 		fi
 	fi
-	if [ $((LINES-x)) -gt $(wc -l < "$1")  -a  $((LINES-x)) -gt $(wc -l < "$2") ] ; then
+	if [ $((LINES-x)) -gt $(wc -l < "$fileA")  -a  $((LINES-x)) -gt $(wc -l < "$fileB") ] ; then
 		debugsay "[Pager not required]"
 		AvoidPager=true
 	fi
@@ -347,40 +472,6 @@ else
 		fi
 	fi
 fi # if $OutputAsHTML
-
-# -------------------------------
-# Build up the files to compare.
-# Convert input DOS files to UNIX, if required
-# -------------------------------
-
-debugsay '[Creating temporary files]'
-trap finish EXIT
-fileA=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
-fileB=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
-fileLHS=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
-fileRHS=$(mktemp) || { echo 'Error: could not create buffer file'; exit 1; }
-
-
-if ! $Be_Quiet ; then
-	debugsay '[Temporary files will start with the filenames]'
-	echo "INPUT: $1" > $fileA
-	echo "INPUT: $2" > $fileB
-fi
-
-if  file "$1" | grep CRLF >/dev/null ; then
-	debugsay "[Must convert file '$1']"
-	dos2unix < "$1" >> $fileA || { echo "Error processing '$1'"; exit 1; }
-else
-	debugsay "[Using file '$1' as-is]"
-	cat < "$1" >> $fileA || { echo "Error copying '$1'"; exit 1; }
-fi
-if  file "$2" | grep CRLF >/dev/null ; then
-	debugsay "[Must convert file '$2']"
-	dos2unix < "$2" >> $fileB || { echo "Error processing '$2'"; exit 1; }
-else
-	debugsay "[Using file '$2' as-is]"
-	cat < "$2" >> $fileB || { echo "Error copying '$2'"; exit 1; }
-fi
 
 # -------------------------------
 # Execute the diff code
@@ -433,13 +524,13 @@ if $WordHighlighting ; then
 				colourCode=''
 			elif [ "$flag" = "<" ] ; then
 				# Line was removed
-				colourCode=$ccRed
+				colourCode=${cc['removed']}
 			elif [ "$flag" = ">" ] ; then
 				# Line was added
-				colourCode=$ccBlue
+				colourCode=${cc['added']}
 			fi
 			# Print with colour codes, and move on to next line
-			printf "${colourCode}%s${ccBlack}\n"  "$line"
+			printf "${colourCode}%s${cc['same']}\n"  "$line"
 			continue
 		fi
 
@@ -457,8 +548,8 @@ if $WordHighlighting ; then
 		# (Note: writing to regular files instead of using  <(..)  Process Substitution - it gives a speed boost)
 		echo -n "$lhsPlain" > "$fileLHS"
 		echo -n "$rhsPlain" > "$fileRHS"
-		lhsCoded=$(wdiff --no-inserted --start-delete="$ccMagenta" --end-delete="$ccBlack" "$fileLHS" "$fileRHS" |  sed -r 's/\\[^x]/\\&/g')
-		rhsCoded=$(wdiff --no-deleted  --start-insert="$ccMagenta" --end-insert="$ccBlack" "$fileLHS" "$fileRHS" |  sed -r 's/\\[^x]/\\&/g')
+		lhsCoded=$(wdiff --no-inserted --start-delete="${cc['changed']}" --end-delete="${cc['same']}" "$fileLHS" "$fileRHS" |  sed -r 's/\\[^x]/\\&/g')
+		rhsCoded=$(wdiff --no-deleted  --start-insert="${cc['changed']}" --end-insert="${cc['same']}" "$fileLHS" "$fileRHS" |  sed -r 's/\\[^x]/\\&/g')
 
 		# Determine the field spacing to assign for the LHS string
 		if [ ${#lhsPlain} -eq 0 ] ; then
@@ -483,7 +574,7 @@ RESULT =
 			EOD
 		fi
 
-		printf "%-${lhsSpace}b${ccMagenta}|${ccBlack} %b\n" "$lhsCoded" "$rhsCoded"
+		printf "%-${lhsSpace}b${cc['changed']}|${cc['same']} %b\n" "$lhsCoded" "$rhsCoded"
 	done |
 	$finalCmd $fOpts
 
@@ -496,6 +587,13 @@ else
 	diffCmd='diff'
 	if $Colourize ; then
 		hash colordiff 2>/dev/null && diffCmd='colordiff'
+		if [ $OutputAsHTML = true -a $diffCmd = 'colordiff' ] ; then
+			capture_colour_from_colordiff
+#			for kind in removed same changed added
+#			do
+#				echo -e "${cc[$kind]}$kind ${cc[same]}"
+#			done
+		fi
 	fi
 
 	debugsay "[Commands to use:  $diffCmd, $finalCmd $fOpts]"
