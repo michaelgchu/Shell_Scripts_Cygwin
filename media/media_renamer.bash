@@ -1,6 +1,6 @@
 #!/bin/bash
 SCRIPTNAME='Media DateTime-Filename Checker'
-LAST_UPDATED='2020-01-04'
+LAST_UPDATED='2020-08-16'
 SCRIPT_AUTHOR="Michael G Chu, https://github.com/michaelgchu/"
 # See Usage() function for purpose and calling details
 #
@@ -17,6 +17,8 @@ SCRIPT_AUTHOR="Michael G Chu, https://github.com/michaelgchu/"
 #
 # Updates (noteworthy)
 # ====================
+# 20200816
+# - New feature: when the destination file already exists, check if they are the same
 # 20200104
 # - New feature: renaming of HEIF image formats (.HEIC)
 # - Bug fix: correct how datetime metadata is pulled from iPhone videos
@@ -69,6 +71,9 @@ using this convention and ensures the date/time filename matches their
 metadata.
 
 A log file is created, i.e. "$mylog"
+Here's a nice grep to check if an image got skipped because it has the same
+timestamp as the image before it (i.e. multiple photos taken per second):
+	$ grep --before-context=1 'SKIP' *log
 
 OPTIONS
 =======
@@ -446,7 +451,10 @@ else	# Normal non-Check Mode
 			logecho "mv --no-clobber --verbose \"$filepath\"\t\"$newName\""
 		else
 			if [ -e "$newName" ] ; then
-				logecho "$filepath: SKIP.  Reason: file '$newName' already exists"
+				msg="$filepath: SKIP.  Reason: file '$newName' already exists"
+				cmp "$filepath" "$newName" >/dev/null
+				test $? -eq 0 && msg="${msg}, and they are identical" || msg="${msg}, but they are different"
+				logecho "$msg"
 				tallySkip=$((tallySkip+1))
 			else
 				mv --no-clobber --verbose "$filepath" "$newName" 2>&1 | tee -a "$mylog"
