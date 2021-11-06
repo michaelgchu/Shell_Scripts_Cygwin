@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 SCRIPTNAME='Side-by-side diff with colour'
-LAST_UPDATED='2020-06-14'
+LAST_UPDATED='2021-11-06'
 # Author: Michael Chu, https://github.com/michaelgchu/
 # See Usage() for purpose and call details
 #
 # Updates
 # =======
+# 20211104
+# - For normal diff, manually inject colouring if there is no colordiff tool
 # 20200614
 # - Allow use of <(...) instead of passing just files
 # - Make use of cmp optional
@@ -66,7 +68,7 @@ done
 
 # Listing of all required tools.  The script will abort if any cannot be found
 requiredTools='diff file mktemp wc cmp'
-extraToolsForWordHighlighting='bc awk sed cut wdiff'
+extraToolsForWordHighlighting='awk sed cut wdiff'
 
 # -------------------------------
 # Functions
@@ -101,11 +103,11 @@ OPTIONS
    -w    Perform word highlighting for modified lines.
          Note 1: only visible sections of the line are highlighted 
          Note 2: this process is slow and a tad buggy. Take with grain of salt
-   -l    Output as HTML.  Appears broken in Linux
+   -l    Output as HTML
          Note 1: your terminal still drives the viewing area of the HTML page
          Note 2: the source files should not contain HTML code
    -b    Run basic 'cmp' first to ensure there are differences to display
-   -C    Do not colourize the output using colordiff
+   -C    Do not colourize the output using colordiff (or internal function)
    -N    Do not print line numbers for the diff output
    -P    Do not use the 'less' pager
    -q    Be Quiet: do not show notices, filenames
@@ -189,6 +191,24 @@ capture_colour_from_colordiff() {
 		cc[$kind]="$ansicode"
 		cc_ree[$kind]="$ansi_re_escaped"
 	done <<< "$output"
+}
+
+
+# Execute this function if the user wants colouring but colordiff isn't available
+manualColouring()
+{
+	# Determine the split point between LHS & RHS
+	# (This is the same split as with word highlighting)
+	split=$( awk '{ half=$1 / 2; print half==int(half) ? half : int(half) + 1 }' <<< $diffWidth )
+	# Reduce value by 1, for use in regex
+	char=$((split - 1))
+	# Now, use regular expressions to apply colour coding:
+	# 1. Consume the X characters leading up to the split point,
+	#    then one of the diff indicators, | or < or >, then the rest.
+	# 2. Apply the corresponding colour sequence for any matches and reset.
+	sed -r  -e "s/^(.{$char}\|.*)/${cc['changed']}\1${cc['same']}/" \
+		-e "s/^(.{$char}<.*)/${cc['removed']}\1${cc['same']}/" \
+		-e "s/^(.{$char}>.*)/${cc['added']}\1${cc['same']}/"
 }
 
 
@@ -489,7 +509,7 @@ if $WordHighlighting ; then
 	# Determine where diff will place the flag column.  From testing:
 	#	--> when even, then the flag column is exactly half
 	#	--> when odd, then the flag column is half rounded up
-	split=$( bc <<< "a=$diffWidth; if ( a%2) a/2+1 else a/2" )
+	split=$( awk '{ half=$1 / 2; print half==int(half) ? half : int(half) + 1 }' <<< $diffWidth )
 	# Used to cut out the LHS of the side-by-side output:
 	lhsCutAt=$((split-2))
 	# Diff only displays at most the below amount of chars per side
@@ -578,36 +598,37 @@ RESULT =
 	done |
 	$finalCmd $fOpts
 
-else
-	# *********************************************
-	# This is the "regular" diff process:  perform the [color]diff, potentially passing to a pager
-	# *********************************************
+	exit $?
+fi # word highlighting
 
-	# Use colordiff if available, and allowed
-	diffCmd='diff'
-	if $Colourize ; then
-		hash colordiff 2>/dev/null && diffCmd='colordiff'
-		if [ $OutputAsHTML = true -a $diffCmd = 'colordiff' ] ; then
-			capture_colour_from_colordiff
-#			for kind in removed same changed added
-#			do
-#				echo -e "${cc[$kind]}$kind ${cc[same]}"
-#			done
-		fi
+
+# *********************************************
+# This is the "regular" diff process:  perform the [color]diff, potentially passing to a pager
+# *********************************************
+
+# Use colordiff if available and allowed. If colordiff isn't available, use our custom function
+diffCmd='diff'
+penultimateCmd='cat'
+if $Colourize ; then
+	hash colordiff 2>/dev/null && diffCmd='colordiff'
+	# Not sure how well these 2 will play together ...
+	test $? -eq 0 || penultimateCmd=manualColouring
+	if [ $OutputAsHTML = true -a $diffCmd = 'colordiff' ] ; then
+		capture_colour_from_colordiff
 	fi
+fi
 
-	debugsay "[Commands to use:  $diffCmd, $finalCmd $fOpts]"
-	debugpause
+debugsay "[Commands to use:  $diffCmd, $finalCmd $fOpts, $penultimateCmd]"
+debugpause
 
-	if $ShowLineNo ; then
-		say "Note: line numbers are for diff output only (and likely not the actual line numbers of the input files)"
-	fi
+if $ShowLineNo ; then
+	say "Note: line numbers are for diff output only (and likely not the actual line numbers of the input files)"
+fi
 
-	# Control exact width of this output using  --width
-	$diffCmd --width=$diffWidth --ignore-space-change --side-by-side $extraOpts "$fileA" "$fileB" |
-	$finalCmd $fOpts
-
-fi # word / regular full-line highlighting
+# Control exact width of this output using  --width
+$diffCmd --width=$diffWidth --ignore-space-change --expand-tabs --side-by-side $extraOpts "$fileA" "$fileB" |
+$penultimateCmd |
+$finalCmd $fOpts
 
 exit $?
 
